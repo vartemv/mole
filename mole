@@ -1,0 +1,474 @@
+#!/bin/bash
+#
+export POSIXLY_CORRECT=yes
+export LC_ALL=C
+##	Checking all enviromental arguments
+[ -z "$EDITOR" ] && editor="${VISUAL:-vi}" || editor="$EDITOR"
+[ -z "$MOLE_RC" ] && echo "!!! Your variable MOLE_RC isn't defined, but it's neccessary for work !!!" 1>&2 && exit 1
+#
+RED=$(tput setaf 1)
+if ! command -v realpath &> /dev/null
+then
+    echo "realpath could not be found"
+    exit 1
+fi
+
+##	Creating directory and log files
+mkdir -p /home/$USER/.mole/
+s_log="/home/$USER/.mole/"
+common_log="$MOLE_RC"
+! [ -f "$common_log" ] && touch $common_log
+#
+
+##	Global variables
+list='false'
+secret_log='false'
+files_in_the_directory=''
+#
+
+##	 Help message
+help_u(){
+	echo "
+Usage:	
+	[-g GROUP] - otevření souboru bude zároveň přiřazeno do skupiny s názvem GROUP.
+	
+	[-m] [FILTERS] [DIRECTORY] – Pokud DIRECTORY odpovídá existujícímu adresáři, skript z daného adresáře vybere soubor, který má být otevřen. 
+	
+	list [FILTERS] [DIRECTORY] – Skript zobrazí seznam souborů, které byly v daném adresáři otevřeny (editovány) pomocí skriptu. 
+
+
+	FILTERS: 
+
+	[-g GROUP1[,GROUP2[,...]]] – Specifikace skupin. Soubor bude uvažován (pro potřeby otevření nebo výpisu) pouze tehdy, pokud jeho spuštění spadá alespoň do jedné z těchto skupin.
+	
+	[-a DATE] - Záznamy o otevřených (editovaných) souborech před tímto datem nebudou uvažovány.
+	
+	[-b DATE] - Záznamy o otevřených (editovaných) souborech po tomto datu nebudou uvažovány.
+	
+	P.S.: Your variables EDITOR and VISUAL should be defined (default is vi); 	
+	"
+}
+
+## Function for opening and logging file
+open_file(){
+	ex_date=$(date +"%Y-%m-%d_%H-%M-%S")
+	add_date $(realpath $1) $ex_date
+	sort -k1 -t ';' -o "$common_log" "$common_log"
+	$editor $1
+}
+
+add_date(){
+
+	line=$(grep -Fn "$1" $common_log)
+
+	if ! [[ $line == *"$2"* ]]; then
+			sed -i  "\;$1; s|$|;$2($group(|" $common_log
+	fi
+}
+
+add_group(){
+
+	line=$(grep -Fn "$1" $common_log)
+	if ! [[ $( echo $line | cut -d ";" -f 2 ) == *"$2"* ]]; then
+		sed -i "\;$1; s|\($1[^;]*;\)|\1$2,|" $common_log
+	fi
+}
+
+create_line(){
+
+	if ! (grep -Fq "$1" $common_log); then
+		echo "$1;$2" >> $common_log
+	fi
+}
+
+create_dir(){
+	
+	filename_number=$(echo $1 | awk -F "/" '{print NF-1}')
+	if [[ $filename_number -gt 0 ]]; then 
+	mkdir -p $(echo $1 | cut -d "/" -f1-$filename_number)
+	fi
+}
+
+sort_files_by_date(){
+	Field_separator=$IFS	
+	IFS=";"
+	
+	for line in $files_in_the_directory; do
+		old_date=$(echo $line | cut -d ':' -f4)
+		IFS='\n'
+		new_date=$(echo $old_date | tr ',' '\n' | tac | tr '\n' ',' | tr '_' ' ')
+		IFS=';'
+		files_in_the_directory=$(echo "$files_in_the_directory" |  sed "s#$old_date#$new_date#g" )
+	
+	done
+	IFS=$Field_separator	
+	files_in_the_directory=$(echo $files_in_the_directory | tr ';' '\n' | sort -t ':' -k 4.2,4.20 | tac | tr '\n' ';' | sed 's/:,/:/g' | sed 's/,:/:/g')			
+}
+
+sort_files_by_usage_or_list(){
+
+	Field_separator=$IFS
+         IFS=";"
+ 
+         for line in $files_in_the_directory; do
+                 old_date=$(echo $line | cut -d ':' -f4 )
+                 IFS='\n'
+                 new_date=$(echo $old_date | tr '_' ' ')
+                 IFS=';'
+                 files_in_the_directory=$(echo "$files_in_the_directory" |  sed "s#$old_date#$new_date#g" )
+ 
+         done
+         IFS=$Field_separator
+ 	
+	if $list; then
+        	files_in_the_directory=$(echo $files_in_the_directory | tr ';' '\n' | sort -t ':' -k1 | tac | tr '\n' ';' | sed 's/:,/:/g' | sed 's/,:/:/g')
+	else
+		files_in_the_directory=$(echo $files_in_the_directory | tr ';' '\n' | sort -t ':' -k3 | tac | tr '\n' ';' | sed 's/:,/:/g' | sed 's/,:/:/g')
+	fi
+}
+
+list_files(){
+	
+	max_length=0
+	files_in_the_directory=$(echo $files_in_the_directory | tr ';' '\n' | sort -t ':' -k1 | tr '\n' ';' )
+	Field_separator=$IFS
+	IFS=';'
+	for lines in $files_in_the_directory; do
+		length=$(echo $lines | cut -d':' -f 1)
+		if [[ ${#length} -gt $max_length ]]; then
+			max_length=${#length}
+		fi
+	done
+	for line in $files_in_the_directory; do
+		 
+		if ! [ -z $line ]; then	
+		possible_group="$( echo $line | cut -d':' -f 2 )"	
+		printf "%-${max_length}s: %s\n" $(echo $line | cut -d':' -f 1) ${possible_group:--} 
+		fi
+	done
+	IFS=$Field_separator
+}
+
+filtering_for_sec(){
+	#echo $files_in_the_directory
+	if ! [ -z $date_after  ]; then
+		Field_separator=$IFS
+		IFS=":"
+		for lines in $files_in_the_directory; do
+			column=$(echo $lines | awk -F\; '{print NF}')
+			dates="$(echo $lines | cut -d ";" -f2-$column )"
+			file="$(echo $lines | cut -d ";" -f1 )"
+			IFS=";"
+			for each_date in $dates; do				
+				if [[ $(date -d "$( echo $each_date | cut -d "_" -f 1)" +%s ) -lt $( date -d "$date_after" +%s ) ]]; then
+                                   files_in_the_directory=$(echo "$files_in_the_directory" |  sed "s#$each_date;##g")
+                           fi
+			done
+		IFS=":"
+		if [ -z "$( echo $files_in_the_directory | grep -Fq "$file" | cut -d";" -f2)" ]; then
+		       files_in_the_directory=$(echo "$files_in_the_directory" |  sed "s#$file;:##g")	
+		fi
+		done
+	IFS=$Field_separator
+	fi			
+		if ! [ -z $date_before  ]; then
+		Field_separator=$IFS
+		IFS=":"
+		for lines in $files_in_the_directory; do
+			column=$(echo $lines | awk -F\; '{print NF}')
+			dates="$(echo $lines | cut -d ";" -f2-$column )"
+			file="$(echo $lines | cut -d ";" -f1 )"
+			IFS=";"
+			for each_date in $dates; do				
+				if [[ $(date -d "$( echo $each_date | cut -d "_" -f 1)" +%s ) -gt $( date -d "$date_before" +%s ) ]]; then
+					
+					files_in_the_directory=$(echo "$files_in_the_directory" |  sed "s#$each_date;##g")
+                           	
+				fi
+			done
+		IFS=":"
+		if [ -z "$( echo $files_in_the_directory | grep -Fq "$file" | cut -d";" -f2)" ]; then
+		       files_in_the_directory=$(echo "$files_in_the_directory" |  sed "s#$file;:##g")	
+		fi
+		done
+	IFS=$Field_separator
+	fi	
+}
+
+compress_data(){
+	datetime=$(date +"%Y-%m-%d_%H-%M-%S")
+	user=$(whoami)
+	touch $s_log/log_${user}_${datetime}.bz2	
+	echo $files_in_the_directory | awk -F: '{for (i=1; i<NF; i++ ) print $i }' | bzip2 -c > $s_log/log_${user}_${datetime}.bz2	
+	
+}
+
+filtering(){
+	files_in_the_directory=$(echo $files_in_the_directory | sed 's/;$//')
+	if ! [ -z $group ]; then	
+		Field_separator=$IFS
+		group_flag="false"
+		IFS=';'
+		for each_line in $files_in_the_directory; do	
+			dates="$(echo $each_line | cut -d ":" -f4 )"
+			usage="$(echo $each_line | cut -d ":" -f3 )"
+			file_and_group_and_usage="$(echo $each_line | cut -d ":" -f1-3)"
+			file_and_group="$(echo $each_line | cut -d ":" -f1-2)"
+			IFS=','
+			for each_group in $group; do			
+				if [[ $(echo $each_line | cut -d':' -f 2 ) == *"$each_group"* ]]; then
+					group_flag="true"
+				fi
+			done
+			if ! $group_flag; then
+				files_in_the_directory=$(echo "$files_in_the_directory" | sed "s#$each_line;##g")
+			fi
+			
+			for each_date in $dates; do
+				flag='false'
+				for each_group in $group; do	
+					if echo $each_date | tr " " "_" | cut -d "(" -f 2 | grep -wq "$each_group" ; then
+						flag='true'
+						continue
+					fi
+				done
+				if ! $flag; then
+				files_in_the_directory=$(echo "$files_in_the_directory" |  sed "s#$each_date,##g")
+                                        usage=$(($usage-1))
+                                        file_and_group+=":$usage"
+                                        files_in_the_directory=$(echo "$files_in_the_directory" | sed "s#$file_and_group_and_usage#$file_and_group#g")
+				fi
+			done
+			group_flag="false"
+			IFS=';'
+			for each_line in $files_in_the_directory; do
+                                if ! [ -z "$each_line"  ]; then
+                                        if [ -z "$(echo $each_line | cut -d ':' -f4 )" ]; then
+                                                files_in_the_directory=$(echo "$files_in_the_directory" |  sed "s;$each_line;;g")
+                                        fi
+                                fi
+                        done
+		done
+		IFS=$Field_separator
+	if [ -z $m ] && ! $list; then
+                        files_in_the_directory=$(echo $files_in_the_directory | tr ';' '\n' | sort -t ':' -k 4.1,4.19 | tac | tr '\n' ';')
+	elif ! [ -z $m  ]; then
+			sort_files_by_usage_or_list
+       	fi
+	
+fi
+
+	files_in_the_directory=$(echo $files_in_the_directory | sed 's/;$//')
+	if ! [ -z $date_after  ]; then
+                Field_separator=$IFS
+                IFS=";"
+
+                for lines in $files_in_the_directory; do
+                        dates="$(echo $lines | cut -d ":" -f4 )"
+                        file="$(echo $lines | cut -d ":" -f1 )"
+			groups="$(echo $lines | cut -d ":" -f2 )"
+			usage="$(echo $lines | cut -d ":" -f3 )"
+                        IFS=","
+                        for each_date in $dates; do
+                                if [[ $(date -d "$( echo $each_date | cut -d " " -f 1)" +%s ) -le $( date -d "$date_after" +%s ) ]]; then
+                                   	files_in_the_directory=$(echo "$files_in_the_directory" |  sed "s#$each_date,##g")
+                           	fi
+                        done
+
+                IFS=';'
+			for each_line in $files_in_the_directory; do
+				if ! [ -z "$each_line"  ]; then	
+					if [ -z "$(echo $each_line | cut -d ':' -f4 )" ]; then
+                       				files_in_the_directory=$(echo "$files_in_the_directory" |  sed "s;$each_line;;g")
+                			fi
+			        fi
+			done
+              	done
+
+        IFS=$Field_separator
+        fi
+	files_in_the_directory=$(echo $files_in_the_directory | sed 's/;$//')
+	if ! [ -z $date_before ]; then
+		Field_separator=$IFS
+                IFS=";"
+                for lines in $files_in_the_directory; do
+                        dates="$(echo $lines | cut -d ":" -f4 )"
+                        file="$(echo $lines | cut -d ":" -f1 )"
+                        groups="$(echo $lines | cut -d ":" -f2 )"
+                        usage="$(echo $lines | cut -d ":" -f3 )"
+                        IFS=","
+                        for each_date in $dates; do
+                                if [[ $(date -d "$( echo $each_date | cut -d " " -f 1)" +%s ) -ge $( date -d "$date_before" +%s ) ]]; then
+                                        files_in_the_directory=$(echo "$files_in_the_directory" |  sed "s#$each_date,##g")
+                                fi
+                        done
+                IFS=';'
+                        for each_line in $files_in_the_directory; do
+				if ! [ -z "$each_line" ]; then	
+			         if [ -z "$(echo $each_line | cut -d ':' -f4)" ]; then	
+                                        files_in_the_directory=$(echo "$files_in_the_directory" |  sed "s;$each_line;;g")
+                                 fi
+			        fi
+                        done
+                done
+        IFS=$Field_separator
+
+		if [ -z $m ] && ! $list; then
+			files_in_the_directory=$(echo $files_in_the_directory | tr ';' '\n' | sort -t ':' -k 4.1,4.19 | tac | tr '\n' ';')
+		fi
+	fi
+
+	files_in_the_directory=$(echo $files_in_the_directory | sed 's/^;//g' | tr -d '\n')		
+	suitable_file=$(echo $files_in_the_directory | cut -d ';' -f 1 | cut -d ':' -f 1 | sed 's/;$//')
+}	
+	
+check_directory(){
+
+	suitable_file=''
+	for file in $(find $1 -maxdepth 1 -type f -name ".*" -or -name "*"); do
+		if [ -f "$file"  ]; then
+		
+		columns=$(grep -e "$(realpath $file)" $common_log | awk -F\; '{print NF}')
+		
+		if ! [ -z $columns ] && [ $columns -gt 2 ]; then		
+		
+			date="$(grep -e "$(realpath $file)" $common_log | cut -d ";" -f3-$columns);"
+			file_groups=$(grep -e "$(realpath $file)" $common_log | cut -d ";" -f 2)
+			
+			if $secret_log; then
+				main_date=''
+                                file_d=$IFS
+				IFS=";"
+                                for each_date in $date; do
+      	                        	main_date+="$(echo $each_date | sed 's/(.*(//g');"
+                                done
+                                IFS=$file_d	
+				files_in_the_directory+="$(realpath "$file");$main_date:"
+			else	
+				files_in_the_directory+="$(realpath "$file"):$file_groups:$(($columns-2)):$(echo $date | tr ';' ',');"
+			fi
+		fi
+	fi
+done
+
+	if ! $list && ! $secret_log ; then
+		if [ -z $m ]; then
+	 		sort_files_by_date
+		elif ! [ -z $m ]; then
+			sort_files_by_usage_or_list
+		fi
+	fi
+	
+	
+	$list && sort_files_by_usage_or_list
+	
+	! $secret_log && filtering
+
+	if ! $secret_log && ! $list; then
+		echo $suitable_file
+	fi
+}
+
+if [ "$1" == 'list'  ]; then
+        list='true'	
+	shift 1
+elif [ "$1" == 'secret-log' ]; then
+	secret_log='true'
+	shift 1
+fi
+
+while getopts ":hg:ma:b:" options; do
+	
+	case $options in 
+		h)
+			help_u
+			exit 1 ;;
+		
+		a)date_after="$OPTARG";;
+		
+		b)date_before="$OPTARG";;
+		
+		g)group="$OPTARG";;
+
+		m)m='yes';;
+		
+		:)
+			 echo "ERROR - -${OPTARG} requires an argument."
+			 exit 1 ;;
+	esac
+done
+
+shift $((OPTIND-1))
+
+if $secret_log; then
+		if [ $# -eq 0 ]; then
+				for line in $(cat $common_log); do
+                                        columns=$(echo $line |  awk -F\; '{print NF}')
+        	                                date="$(echo $line | cut -d ";" -f3-$columns);"
+						main_date=''
+						file_d=$IFS
+						IFS=";"
+						for each_date in $date; do
+							main_date+="$(echo $each_date | sed 's/(.*(//g');"
+							
+						done
+						IFS=$file_d
+                                        file="$(echo $line | cut -d ";" -f 1)"
+                	                files_in_the_directory+="$file;$main_date:"
+                                done
+		else 
+			for arg in $@; do
+				check_directory $arg	
+			done
+		fi
+	
+	filtering_for_sec
+	compress_data
+	exit 1
+else
+	if [ $# -eq 0 ]; then 
+		directory="$(pwd)"
+		if $list ; then
+			check_directory $directory
+			list_files
+			exit 1
+		fi
+		#check_directory $directory
+		desired_file=$( check_directory $directory )
+		if [ -z "$desired_file" ]; then
+			echo "ERROR: You haven't file in this directory" 1>&2
+			exit 
+		fi
+		open_file $desired_file
+	fi 
+	for arg in "$@"; do
+		if [ -d $arg ]; then 	
+			directory="${arg}"
+			if $list ; then
+				check_directory $directory
+				list_files
+				exit 1
+			fi
+			#check_directory $directory
+			desired_file=$(check_directory $directory)	
+			if [ -z "$desired_file" ]; then
+                         echo "ERROR: You haven't file in this directory" 1>&2
+                         exit
+                 fi
+
+			open_file $desired_file
+	
+		else
+			create_dir $arg
+			create_line $(realpath $arg) $group
+			open_file $arg
+
+		        if  [ -n $group  ]; then
+                                add_group $(realpath $arg) $group
+                        else
+				echo "Invalid input "
+				exit 1	
+			fi
+		fi
+	done
+fi
